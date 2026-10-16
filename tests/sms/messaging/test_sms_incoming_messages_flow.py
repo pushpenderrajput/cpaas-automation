@@ -1,50 +1,11 @@
-"""
-SMS Incoming Messages — Single Sequential Flow
-================================================
-Covers: Channels → SMS → More → Incoming Messages page, TC001 - TC025
-(URL: /channels/sms/incoming-messages)
 
-Migrated to Playwright: local page-object fixture renamed
-`incoming_messages_page` (built on conftest.py's `module_logged_in_page`)
-to avoid shadowing pytest-playwright's reserved `page` fixture. Export
-CSV now captures Playwright's native download event instead of polling
-DOWNLOAD_DIR by file mtime; window resizing for the responsive-layout
-test uses page.set_viewport_size().
-
-Built from a FULL live DOM dump of this exact page plus a supplied
-manual-QA pass table (all 25 TCs marked Pass by the tester). Locators
-(pages/sms_incoming_messages_page.py) are grounded directly in that
-dump -- see the page object's module docstring for the full list of
-confirmed specifics: all 6 columns selected by default (opposite of the
-Blocked Numbers page, same convention as SMS Error Codes), only
-Received At is sortable, the Filters popover uses native date+time
-inputs (NOT flatpickr) for a Sender ID select plus Received From/To,
-no bulk actions/row checkboxes exist on this page, the Action column's
-View button opens the shared livewire-ui-modal component, and
-pagination text uses class "total-pagination-results" (different from
-Blocked Numbers' "paged-pagination-results").
-
-CAVEATS (best-effort, flagged individually below):
-  - NO_RECORDS_MSG (TC025): no genuine empty state was ever rendered in
-    the dump (6 real records existed) -- exercised via an
-    impossible-to-match search term, mirroring the Blocked Numbers
-    page's TC006 pattern, with a broadened best-effort locator.
-  - Modal close (TC012): no explicit in-modal close button was captured;
-    closes via the confirmed Escape-key handler instead.
-
-NOTE: TC010 (Clear filter) and TC021 (Hide/show columns) were removed
-from this suite per request.
-
-Run:
-    pytest tests/test_sms_incoming_messages_flow.py -v
-"""
 import os
 
 import pytest
 
-from constants.sms_incoming_messages_headers import EXPECTED_SMS_INCOMING_MESSAGES_HEADERS
-from constants.sms_incoming_messages_ui_headers import EXPECTED_SMS_INCOMING_MESSAGES_UI_HEADERS
-from pages.sms.sms_incoming_messages_page import SmsIncomingMessagesPage
+from constants.sms.messaging.sms_incoming_messages_headers import EXPECTED_SMS_INCOMING_MESSAGES_HEADERS
+from constants.sms.messaging.sms_incoming_messages_ui_headers import EXPECTED_SMS_INCOMING_MESSAGES_UI_HEADERS
+from pages.sms.messaging.sms_incoming_messages_page import SmsIncomingMessagesPage
 from utils.file_validator import (
     EmptyFileError,
     FileNotDownloadedError,

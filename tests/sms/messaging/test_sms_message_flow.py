@@ -136,15 +136,40 @@ def test_TC002_table_or_no_records_visible(message_page):
 
 @pytest.mark.smoke
 def test_TC003_search_valid_mobile_number(message_page):
-    """Searching a known mobile number returns matching records."""
+    """Searching a REAL mobile number taken from the table itself returns
+    matching records -- never a hardcoded number, which could legitimately
+    not exist in every environment/account's data (the hardcoded
+    "917973059161" this replaced failed with neither results nor a
+    no-records message for exactly that reason). Same column-index
+    lookup pattern test_TC024_default_columns_visible /
+    test_TC031_sms_count_column_numeric already use in this file."""
     ensure_on_messages_page(message_page)
-    term = "917973059161"
+    message_page.navigate()
+    message_page.wait_for_table_load(timeout=15000)
+
+    headers = [h.lower() for h in message_page.get_table_headers()]
+    mobile_idx = next(
+        (i for i, h in enumerate(headers) if "mobile" in h or "contact" in h or "destination" in h),
+        -1,
+    )
+    if mobile_idx == -1:
+        pytest.skip(f"Mobile/Contact number column not found. Headers: {headers}")
+
+    if message_page.get_row_count() == 0:
+        pytest.skip("No data rows available in this environment to pull a real mobile number from")
+
+    values = [v for v in message_page.get_all_values_in_column(mobile_idx) if v]
+    if not values:
+        pytest.skip("Mobile/Contact number column has no non-empty values to search for")
+    term = values[0]
+
     message_page.search(term)
     message_page.wait_for_table_load(timeout=10000)
     rows = message_page.get_row_count()
     empty = message_page.is_no_records_visible()
     assert rows > 0 or empty, \
-        f"Search for {term!r} returned neither results nor a no-records message"
+        f"Search for {term!r} (taken from the table's own Mobile/Contact column) " \
+        f"returned neither results nor a no-records message"
     message_page.clear_search()
     message_page.page.wait_for_timeout(1000)
 

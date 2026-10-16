@@ -1,84 +1,9 @@
-"""
-SMS Campaign Message Report page — Automated Test Suite
-Path: /campaigns/messages/<metric>/<campaignUuid>
-
-Covers the per-campaign SMS report page's 9 stat cards (7 clickable, 2
-non-clickable) and the exact table-header contract for each clickable
-card's resulting table, per the task specification supplied for this
-suite. This is NOT the same page as
-tests/sms/reports/test_sms_campaign_report_flow.py (that one covers the
-AGGREGATE report listing every campaign, at /channels/sms/reports/
-campaign, with a per-row "Campaign Status Details" modal).
-
-Built from real, pasted DOM captures -- never fabricated: the SMS
-Campaign listing page's row "Reports" icon
-(data-tooltip-target="tooltip-reports-<id>"), the report page's own 9
-stat cards markup (onclick="window.location='.../campaigns/messages/
-<metric>/<uuid>'" for the 7 clickable cards; no onclick at all for
-Delivery Rate / Unique Clicks), and the message table's <thead> for the
-default "total" metric. See
-pages/sms/sms_campaign_message_report_page.py's module docstring for
-every confirmed DOM detail driving the locators/methods used here.
-
-Test Design Notes:
-  - scope="module" -- the page is reached ONCE per module by navigating
-    the SMS Campaign listing page and clicking the Reports icon on its
-    first row (there is no campaign-agnostic URL -- the campaign id, a
-    UUID, is part of the path). ensure_on_report_page() recovers to the
-    SAME campaign's report page (via the cached campaign id) if a test
-    navigates away.
-  - TC03-TC09 (data-driven card + expected-header coverage) use
-    pytest.mark.parametrize over CLICKABLE_REPORT_CARDS rather than one
-    duplicated test method per card, per the task's explicit instruction.
-  - Non-clickable cards (Delivery Rate, Unique Clicks) are verified
-    STRUCTURALLY (no onclick handler present) rather than via a CSS
-    class -- see the page object docstring for why. Clicking them is
-    asserted to change neither the URL nor the table headers.
-  - Each metric's table renders a different header set (confirmed by the
-    task's own specification, e.g. Rejected has only 3 columns); the
-    page object's verify_table_headers() strips a leading "Action"
-    column before comparing, since every captured table -- independently
-    of which metric -- renders that extra, non-data column first.
-  - Each card dict in CLICKABLE_REPORT_CARDS carries TWO separate
-    expected-header lists, deliberately NOT shared:
-      * "headers" -- the ON-SCREEN table headers used by TC03-09.
-        CONFIRMED rendered in UPPERCASE (e.g. "CONTACT", "STATUS") --
-        almost certainly a CSS text-transform rather than the real
-        underlying header text, but Playwright's inner_text() (used by
-        get_visible_column_headers()) returns rendered text, so the
-        comparison must use the same UPPERCASE strings actually seen on
-        screen.
-      * "export_headers" -- the DOWNLOADED FILE headers used by TC12, in
-        Title Case (e.g. "Contact", "Status") -- CONFIRMED per-metric
-        directly from a real exported file's header rows (a
-        server-generated export does not apply the live page's CSS
-        uppercase transform, exactly as expected): total/submitted/
-        delivered/failed all share the same 7 columns ending in "DLR
-        Received At"; DLR Awaited omits that trailing column (6 total);
-        Rejected has only 3 (Contact, Status, Received At); Total Clicks
-        has its own distinct 6-column set.
-  - TC12 (export-per-card header validation) reuses the project's
-    existing generic utils/file_validator.validate_file_headers() -- the
-    SAME validator already used by
-    tests/sms/reports/test_sms_campaign_report_flow.py -- rather than any
-    new CSV-reading logic. Unlike TC03-09, this does NOT strip a leading
-    "Action" column, since an exported file (no interactive buttons) is
-    not confirmed to carry that column the way the on-screen table does.
-    The Export CSV control's locator
-    (SmsCampaignMessageReportPage.EXPORT_CSV_LINK) IS now confirmed from
-    a real DOM paste: a plain <a> anchor (not a <button>), href shape
-    ".../campaigns/messages/<campaign_uuid>/export?table=<TableName>" --
-    see that constant's docstring for the full detail.
-
-Run:
-    pytest tests/sms/campaigns/test_sms_campaign_message_report_flow.py -v
-"""
 import re
 
 import pytest
 
-from pages.sms.sms_campaign_page import SMSCampaignPage
-from pages.sms.sms_campaign_message_report_page import SmsCampaignMessageReportPage
+from pages.sms.campaigns.sms_campaign_page import SMSCampaignPage
+from pages.sms.campaigns.sms_campaign_message_report_page import SmsCampaignMessageReportPage
 from utils.file_validator import (
     EmptyFileError,
     FileNotDownloadedError,
@@ -598,7 +523,7 @@ def report_page(module_logged_in_page):
     # any of TC03-TC09's header assertions run, rather than reacting
     # per-test.
     try:
-        from pages.sms.sms_message_page import SMSMessagePage
+        from pages.sms.messaging.sms_message_page import SMSMessagePage
         SMSMessagePage(p.page).restore_default_columns()
         p.page.reload()
         p.wait_for_table_load(timeout=15000)
@@ -741,6 +666,14 @@ def test_click_report_card_and_verify_headers(report_page, card):
 
     report_page.click_report_card(card["name"])
     report_page.wait_for_table_load(timeout=15000)
+    # Some metrics' tables render part of their column set as OPTIONAL,
+    # hidden behind the page's "Columns" checkbox panel (CONFIRMED for
+    # "Total Clicks" from a real screenshot: only Contact/Status render
+    # by default, the other 4 columns require checking their boxes --
+    # see SmsCampaignMessageReportPage.ensure_columns_checked()). This is
+    # a no-op for any card/column that has no such toggle (e.g. the
+    # always-on columns on Total Messages/Submitted/.../Rejected).
+    report_page.ensure_columns_checked(card["headers"])
 
     expected_metric = SmsCampaignMessageReportPage.CARD_NAME_TO_METRIC[card["name"]]
     actual_metric = report_page.get_active_metric_from_url()

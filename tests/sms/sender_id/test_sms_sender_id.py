@@ -1179,15 +1179,11 @@ class TestFilterSenderIds:
         assert result, "Filter should show records or a no-records message"
         _to_list(sender_id_page)
 
-    @pytest.mark.regression
-    @pytest.mark.negative
-    def test_filter_invalid_entity_id(self, sender_id_page):
-        """Filter by an invalid Entity ID shows no records."""
-        _to_list(sender_id_page)
-        sender_id_page.filter_by_entity_id("INVALID_ENTITY_ZZZ999")
-        assert sender_id_page.has_no_records_message(), \
-            "Invalid Entity ID filter should show no-records message"
-        _to_list(sender_id_page)
+    # test_filter_invalid_entity_id was removed per explicit instruction --
+    # a live pytest run timed out 20s waiting for the Filter button
+    # locator (//button[contains(text(),'Filter')] |
+    # //button[contains(@class,'filter')]) to become visible, and the
+    # user asked for it to be dropped rather than chased further.
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -430,30 +430,57 @@ def format_filter_date_time(dt):
     return dt.strftime("%Y-%m-%d"), time_str
 
 
-def capture_campaign_dlt_template_id(report_page):
-    """Opens the View popup on the first row of the (already-loaded)
-    Campaign Report page and reads the DLT Template ID from it --
-    SmsCampaignMessageReportPage.message_details_popup() is confirmed to
-    return the SAME Livewire modal the SMS Messages page itself uses
-    (see that method's own docstring), so its new, dedicated
-    get_popup_dlt_template_id() (pages/sms/messaging/sms_message_page.py)
-    is reused directly rather than re-implemented here. Returns '' (not
-    an exception) if the popup never opens or the field isn't found --
-    callers decide whether a blank DLT Template ID is acceptable for
-    their filter (e.g. by skipping that one filter rather than failing
-    the whole run)."""
+def capture_campaign_popup_details(report_page, campaign_id=None):
+    """Opens the View popup on row 0 of the Campaign Report page and extracts
+    both the DLT Template ID and the Message ID batch prefix (UUID).
+    If the page is currently on a metric view with 0 rows (e.g. dlr-awaited
+    after delivery completes), navigates to 'delivered' or 'total' first
+    where records are confirmed present. Returns (dlt_id, message_id_prefix)."""
+    dlt_id = ""
+    msg_prefix = ""
     try:
+        cid = campaign_id or getattr(report_page, "_campaign_id", None) or report_page.get_campaign_id_from_url()
+        if cid:
+            report_page.navigate_to_campaign(cid, metric="delivered")
+            report_page.wait_for_table_load()
+            if report_page.has_no_records_message() or report_page.get_row_count() == 0:
+                report_page.navigate_to_campaign(cid, metric="total")
+                report_page.wait_for_table_load()
+        elif report_page.has_no_records_message() or report_page.get_row_count() == 0:
+            cid = report_page.get_campaign_id_from_url()
+            if cid:
+                report_page.navigate_to_campaign(cid, metric="delivered")
+                report_page.wait_for_table_load()
+                if report_page.has_no_records_message() or report_page.get_row_count() == 0:
+                    report_page.navigate_to_campaign(cid, metric="total")
+                    report_page.wait_for_table_load()
+
         opened = report_page.click_view_in_row(0)
-        if not opened:
-            return ""
-        popup = report_page.message_details_popup()
-        if not popup.is_popup_open():
-            return ""
-        dlt_id = popup.get_popup_dlt_template_id()
-        popup.close_popup()
-        return (dlt_id or "").strip()
+        if opened:
+            popup = report_page.message_details_popup()
+            if popup.is_popup_open():
+                dlt_id = (popup.get_popup_dlt_template_id() or "").strip()
+                raw_msg_id = (popup.get_popup_message_id() or "").strip()
+                if not raw_msg_id:
+                    all_text = popup.get_popup_all_text()
+                    m = re.search(r"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})", all_text, re.I)
+                    if m:
+                        msg_prefix = m.group(1).lower()
+                else:
+                    msg_prefix = raw_msg_id.split(":")[0].strip().lower()
+                popup.close_popup()
     except Exception:
-        return ""
+        pass
+    return dlt_id, msg_prefix
+
+
+def capture_campaign_dlt_template_id(report_page, campaign_id=None):
+    """Opens the View popup on the first row of the Campaign Report page and
+    reads the DLT Template ID from it. If the page is currently on a metric
+    with 0 rows (e.g. dlr-awaited after delivery completes), navigates to
+    'delivered' or 'total' first where rows are present."""
+    dlt_id, _ = capture_campaign_popup_details(report_page, campaign_id=campaign_id)
+    return dlt_id
 
 
 def collect_message_records_from_messages_log(
@@ -463,6 +490,8 @@ def collect_message_records_from_messages_log(
     from_dt,
     to_dt,
     export_timeout_ms=120000,
+    expected_recipients=None,
+    message_id_prefix=None,
 ):
     """Sections 5-7 of the spec, via the SMS Messages Log page instead of
     the Download Center: filter the Messages page down to exactly this
@@ -477,6 +506,14 @@ def collect_message_records_from_messages_log(
 
     from_dt/to_dt: datetime objects already rounded with
     floor_to_5min()/ceil_to_5min().
+
+    expected_recipients: optional list of expected recipient numbers from
+    the input file. When supplied, any row whose phone number does not
+    match the input file is excluded.
+
+    message_id_prefix: optional campaign batch UUID prefix. When supplied,
+    isolates this run's records from prior runs that may have occurred in
+    the same 5-minute window.
 
     Returns (downloaded_file_path, export_headers, rows) where rows is
     the list of {header: value} dicts from the export -- NOT yet reduced
@@ -515,6 +552,37 @@ def collect_message_records_from_messages_log(
         )
 
     headers, rows = read_file_rows(file_path)
+
+    phone_header = _find_column(headers, _PHONE_HEADER_KEYWORDS) or "Mobile Number"
+    msgid_header = _find_column(headers, _MESSAGE_ID_HEADER_KEYWORDS) or "Message Id"
+
+    # 1. Filter out any phone numbers that were not in the dynamic input file
+    if expected_recipients:
+        exp_phones = {_coerce_phone_str(p) for p in expected_recipients if _coerce_phone_str(p)}
+        rows = [r for r in rows if _coerce_phone_str(r.get(phone_header)) in exp_phones]
+
+    # 2. Filter by message ID batch prefix if captured (isolates current campaign from prior runs)
+    if message_id_prefix:
+        prefix_clean = message_id_prefix.strip().lower()
+        matched_by_prefix = [
+            r for r in rows
+            if prefix_clean in (r.get(msgid_header) or "").strip().lower()
+        ]
+        if matched_by_prefix:
+            rows = matched_by_prefix
+    elif expected_recipients and len(rows) > len(expected_recipients):
+        # Fallback if prefix was not captured: group by batch UUID prefix in Message Id
+        batches = {}
+        for r in rows:
+            mid = (r.get(msgid_header) or "").strip()
+            prefix = mid.split(":")[0].strip() if ":" in mid else mid
+            batches.setdefault(prefix, []).append(r)
+        exact_batch = next((b for b in batches.values() if len(b) == len(expected_recipients)), None)
+        if exact_batch:
+            rows = exact_batch
+        else:
+            rows = list(batches.values())[-1]
+
     return file_path, headers, rows
 
 

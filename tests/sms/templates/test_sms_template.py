@@ -618,21 +618,11 @@ class TestVerifyCreatedTemplates:
 
 class TestTemplateSearch:
 
-    @pytest.mark.regression
-    def test_search_created_template(self, template_page):
-        # Independent of TestCreateTemplate having run first in this
-        # session: if nothing is in `_created` yet (a filtered/subset run,
-        # `-k` targeting only this class, or run order was disturbed),
-        # create our own scratch template instead of skipping -- see
-        # _create_scratch_template()'s docstring. Otherwise, reuse the
-        # most recently created one without popping it, same as before.
-        name = _created[0] if _created else _create_scratch_template(template_page)
-        _to_list(template_page)
-        template_page.search(name)
-        template_page.page.wait_for_timeout(2000)
-        assert template_page.get_row_count() > 0 or not template_page.has_no_records_message(), \
-            f"Search for '{name}' should return results"
-        template_page.clear_search()
+    # test_search_created_template was removed per explicit instruction --
+    # a live pytest run showed the search genuinely returning 0 rows for a
+    # template the test itself had just created/reused (get_row_count()
+    # == 0 and has_no_records_message() == True), and the user asked for
+    # it to be dropped rather than chased further.
 
     @pytest.mark.regression
     @pytest.mark.negative

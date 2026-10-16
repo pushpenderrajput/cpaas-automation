@@ -1,26 +1,13 @@
-"""
-SMS Campaigns — TC001 to TC051
-Single browser session, sequential execution.
 
-Migrated to Playwright: local page-object fixture renamed `campaign_page`
-(built on conftest.py's `module_logged_in_page`) to avoid shadowing
-pytest-playwright's reserved `page` fixture. Direct `page.driver.find_element`
-Selenium calls in TC032/TC038/TC044 are replaced with
-`campaign_page.page.locator(...)` + Playwright's `select_option()`.
-
-Run all:
-    pytest tests/test_sms_campaign_flow.py -v
-Run smoke only:
-    pytest tests/test_sms_campaign_flow.py -v -m smoke
-"""
 
 import os
 import time
 import pytest
 from datetime import datetime, timedelta
 
-from pages.sms.sms_campaign_page import SMSCampaignPage
-from constants.sms_campaign_ui_headers import EXPECTED_SMS_CAMPAIGN_UI_HEADERS
+from pages.sms.campaigns.sms_campaign_page import SMSCampaignPage
+from constants.sms.campaigns.sms_campaign_ui_headers import EXPECTED_SMS_CAMPAIGN_UI_HEADERS
+
 from utils.config import Config
 from utils.test_data_generator import generate_all, DATA_DIR
 from utils.parallel import unique_name

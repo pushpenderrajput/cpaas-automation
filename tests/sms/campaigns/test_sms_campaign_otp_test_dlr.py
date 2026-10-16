@@ -1,29 +1,9 @@
-"""
-test_sms_campaign_otp_test_dlr.py
-
-Test Case: Verify DLR for OTP SMS Campaign
-DLR Verification API: POST {dlr_base_url}/api/v1/dlr/verify
-
-Steps:
-  1. Load SMS_OTP_TEMPLATE_NAME from config/.env (fail if missing).
-  2-3. Create and launch an SMS UI campaign with that OTP template (sender = SMS_SENDER_ID,
-       contacts = SMS_PASTE_CONTACTS), Send Now, launch it.
-  4-13. utils/campaign_dlr.verify_campaign_dlrs(): find the campaign by its created name,
-       open its report, View every recipient -> message_id, ONE bulk /api/v1/dlr/verify,
-       every id must have a correlated DLR, 0 missing.
-
-If DLR_CAMPAIGN_NAME is explicitly set in .env / environment, the test verifies that
-existing campaign directly without creating a new one.
-
-DLR status / provider_status / status_code are NOT validated.
-"""
-
 import os
 import time
 
 import pytest
 
-from pages.sms.sms_campaign_page import SMSCampaignPage
+from pages.sms.campaigns.sms_campaign_page import SMSCampaignPage
 from utils.campaign_dlr import verify_campaign_dlrs
 from utils.config import Config
 

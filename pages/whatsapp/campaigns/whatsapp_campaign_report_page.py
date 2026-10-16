@@ -569,6 +569,51 @@ class WhatsAppCampaignReportPage(BasePage):
                 continue
         return None
 
+    def get_view_row_indices(self):
+        """Return the 0-based indices (among visible, non-empty data
+        rows) of EVERY row that has a View icon -- a direct
+        generalization of get_first_row_index_with_view_icon() above
+        (same VIEW_ICON_IN_ROW locator, same empty-row skip logic),
+        needed so multi-recipient callers (e.g. WhatsApp campaign DLR
+        verification, utils/whatsapp_campaign_dlr.py) can walk every
+        sent recipient's row, not just the first."""
+        try:
+            rows = self.page.locator(self.TABLE_ROWS)
+            count = rows.count()
+        except Exception:
+            return []
+        indices = []
+        for i in range(count):
+            row = rows.nth(i)
+            try:
+                if not row.is_visible():
+                    continue
+                tds = row.locator("td")
+                if tds.count() == 0 or not any(t.strip() for t in tds.all_inner_texts()):
+                    continue
+                if row.locator(self.VIEW_ICON_IN_ROW).first.count() > 0:
+                    indices.append(i)
+            except Exception:
+                continue
+        return indices
+
+    def click_view_on_row(self, index):
+        """Click the View icon on the row at `index` (as returned by
+        get_view_row_indices()) -- same click/scroll/wait_timeout
+        sequence as click_view_on_first_row(), just parameterized by
+        row index instead of always resolving index 0's substitute."""
+        try:
+            row = self.page.locator(self.TABLE_ROWS).nth(index)
+            btn = row.locator(self.VIEW_ICON_IN_ROW).first
+            if btn.count() == 0:
+                return False
+            btn.scroll_into_view_if_needed()
+            btn.click(force=True)
+            self.page.wait_for_timeout(1500)
+            return True
+        except Exception:
+            return False
+
     def click_view_on_first_row(self):
         """Click the View icon on the first row that actually HAS one --
         NOT necessarily row index 0 (see get_first_row_index_with_view_icon()

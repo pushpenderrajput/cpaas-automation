@@ -509,6 +509,19 @@ class Config:
     # mutating agent state.
     RCS_AGENT_NAME = os.getenv("RCS_AGENT_NAME", "agentsim")
 
+    # Visible name (or unique substring) of the RCS Template to select in
+    # the campaign-creation flow once RCS_AGENT_NAME is chosen -- mirrors
+    # SMS_TEMPLATE_NAME's role for the SMS Campaign suite (see
+    # tests/rcs/campaigns/test_rcs_campaign_create_flow.py's
+    # _select_default_template(), which matches this the same way
+    # _select_default_agent() already matches RCS_AGENT_NAME: by visible
+    # text via RcsCampaignCreatePage.select_template_by_visible_text(),
+    # falling back to index 1 when unset or not found so this introduces
+    # no new failure mode). Left empty by default -- no specific template
+    # name has been confirmed for RCS_AGENT_NAME ('agentsim') on every
+    # environment; set this once one is confirmed for this instance.
+    RCS_CAMPAIGN_TEMPLATE_NAME = os.getenv("RCS_CAMPAIGN_TEMPLATE_NAME", "").strip()
+
     # ── RCS Template test data ───────────────────────────────────────────────
     # Visible name of the RCS Agent used when creating a TEMPLATE.
     # Deliberately a SEPARATE variable from RCS_AGENT_NAME above, NOT a

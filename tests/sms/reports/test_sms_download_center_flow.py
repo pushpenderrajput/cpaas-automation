@@ -108,6 +108,50 @@ def reset_filters(p: SMSDownloadCenterPage):
     p.wait_for_table_load(timeout=10000)
 
 
+def _ensure_completed_report(download_center_page, report_name, days,
+                              timeout_s=90, poll_interval_s=3):
+    """
+    Make sure a report named `report_name` exists and has reached
+    'completed' status, creating it (via _create_date_range_report,
+    defined below) if no row with that name exists yet. Polls by
+    re-searching rather than trusting a single snapshot, since a
+    freshly-created report starts 'pending'/'processing' and only later
+    flips to 'completed'.
+
+    Returns the row index (within the name-filtered table) of the first
+    'completed' row found, or None if the report never reaches
+    'completed' (or reaches 'failed') within `timeout_s`.
+
+    Added for TC_10 (test_tc10_download_initiates): that test used to
+    grab row 0 of a generic status=Completed filter, which could -- and
+    in a real run did -- pick up a large multi-day report (e.g.
+    "Automated Report - 20 Days", left over from TC_19/20/21) whose
+    export is genuinely slow to generate and blew through the download
+    wait budget. Targeting one specific, small (1-day) report by name
+    avoids that regardless of what other reports exist in the account.
+    """
+    ensure_on_dc_page(download_center_page)
+    download_center_page.search(report_name)
+    download_center_page.page.wait_for_timeout(1000)
+
+    if download_center_page.get_row_count() == 0:
+        download_center_page.clear_search()
+        _create_date_range_report(download_center_page, report_name, days)
+        download_center_page.search(report_name)
+        download_center_page.page.wait_for_timeout(1000)
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        download_center_page.search(report_name)
+        row_idx = download_center_page.find_row_with_status("completed")
+        if row_idx >= 0:
+            return row_idx
+        if download_center_page.find_row_with_status("failed") >= 0:
+            return None
+        time.sleep(poll_interval_s)
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TC_00 — Create a new report (runs first so downstream tests have data)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -367,26 +411,35 @@ class TestTC08FilterProcessing:
 class TestTC10Download:
     """TC_10: Clicking Download on a Completed report downloads a file."""
 
+    # Deliberately a SMALL (1-day) report, not whatever row a generic
+    # Completed filter happens to put first -- see _ensure_completed_report()
+    # docstring for why.
+    TC10_REPORT_NAME = "Automated Report - 1 Day"
+    TC10_REPORT_DAYS = 1
+
     def test_tc10_download_initiates(self, download_center_page):
         ensure_on_dc_page(download_center_page)
-        # Find a completed row
-        download_center_page.open_filter_panel()
-        download_center_page.page.wait_for_timeout(300)
-        download_center_page.set_filter_status(SMSDownloadCenterPage.STATUS_COMPLETED)
-        download_center_page.page.wait_for_timeout(1500)
-        if download_center_page.get_row_count() == 0:
-            pytest.skip("No completed reports available to test download")
+
+        row_idx = _ensure_completed_report(
+            download_center_page, self.TC10_REPORT_NAME, self.TC10_REPORT_DAYS
+        )
+        if row_idx is None:
+            pytest.skip(
+                f"'{self.TC10_REPORT_NAME}' never reached 'completed' status "
+                "within the wait budget -- cannot test download without a "
+                "completed report"
+            )
 
         # Clear the download directory so only the new file will be found.
         download_center_page.clear_download_dir()
 
-        # Diagnostic: what does the download control for row 0 actually
+        # Diagnostic: what does the download control for this row actually
         # resolve to? Captured BEFORE clicking, unconditionally, so it's
         # available for the failure message no matter what happens next.
         # Two prior fix attempts here (20s timeout, then a re-click retry)
         # didn't stop this from recurring — the next failure needs real
         # evidence instead of a third guess.
-        diag = download_center_page.diagnose_download_target(row_idx=0)
+        diag = download_center_page.diagnose_download_target(row_idx=row_idx)
 
         # Also capture any network response that looks like a download/
         # export/report request during the click window, so the failure
@@ -412,7 +465,7 @@ class TestTC10Download:
             # and would never be detected as "new".
             before = download_center_page.snapshot_downloads()
 
-            download_center_page.click_download_icon(row_idx=0)
+            download_center_page.click_download_icon(row_idx=row_idx)
 
             # A completed report covering a large date range can still take
             # a long time to actually export/download — "Completed" status
@@ -436,7 +489,7 @@ class TestTC10Download:
                     # a fresh click, since re-clicking a NEW attempt is the
                     # right move here (there's no competing export to worry
                     # about — none started).
-                    download_center_page.click_download_icon(row_idx=0)
+                    download_center_page.click_download_icon(row_idx=row_idx)
                     downloaded = download_center_page.wait_for_download(timeout=60, before=before)
         finally:
             download_center_page.page.remove_listener("response", _on_response)

@@ -1,96 +1,10 @@
-"""
-test_sms_campaign_short_url_click_dlr.py
-
-Test Case: Verify DLR and Short URL Click Count
-DLR Verification API: POST {dlr_base_url}/api/v1/dlr/verify
-
-The template comes ONLY from .env, its own dedicated variable (kept
-separate from SMS_TRANSACTION_TEMPLATE, used by the sibling
-test_sms_campaign_transaction_template_dlr.py, so the two tests can be
-pointed at different templates independently):
-    SMS_URL_CLICK_TEMPLATE=test_url_template
-    SMS_URL_CLICK_TEMPLATE_TYPE=TRANSACTIONAL
-
-Steps 1-9 (launch the campaign with that template, find it, open its
-report, collect every recipient's message_id via View, ONE bulk
-POST /api/v1/dlr/verify, every id must have a correlated DLR) reuse
-utils/campaign_dlr.verify_campaign_dlrs() exactly as
-test_sms_campaign_transaction_template_dlr.py and
-test_sms_campaign_otp_test_dlr.py do -- nothing about that flow is
-reimplemented here.
-
-What THIS test adds on top (steps 10-16 of the spec) needed one small,
-purely-additive extension to utils/campaign_dlr.py: _collect_message_ids()
-already opens each recipient's message-details popup to read
-get_popup_message_id() -- it now ALSO reads get_popup_content() (falling
-back to get_popup_all_text()) from that SAME already-open popup and
-returns it as message_contents[label], with no extra View click/page
-load. CampaignDlrResult carries this new field; existing callers that
-never look at it are unaffected -- confirmed via
-`pytest tests/sms/campaigns --collect-only` after the change (104 tests
-still collect, same as before).
-
-Locating the short URL (step 6): scans every collected recipient's
-message_contents for the first http(s) URL (a generic URL regex -- no
-specific short-link domain is assumed/fabricated, since none was ever
-confirmed for this app; whatever real short-link host the template
-renders is picked up as-is). If the template's short-link merge field
-renders the SAME link for every recipient (unconfirmed either way --
-never verified against a real send), this still works: it just finds
-that shared link on the first recipient whose popup content contains it.
-
-Click count (steps 10, 14-15): the per-campaign report page's own
-"Total Clicks" stat card (SmsCampaignMessageReportPage.get_card_value(),
-CONFIRMED real element -- see that class's docstring and
-test_sms_campaign_message_report_flow.py) is used as `click_count`, since
-it is the only place on this page a numeric click COUNT genuinely exists
-structurally. (The card's own drill-down table, reached via
-click_report_card("Total Clicks"), lists individual CLICK EVENTS with a
-"Clicked URL" column -- confirmed real headers: Contact/Status/Clicked
-URL/Clicked At/Browser-Device-OS/Geo Location-IP -- but that table has no
-row at all for a not-yet-clicked message, so it cannot supply the *before*
-count; the stat card can.) Per the spec's own "Important" note, this does
-NOT assume the count starts at 0 -- it reads the real value before
-clicking. The spec's own steps/example walk through exactly ONE click
-("click URL once ... final_click_count = X + 1"); this test clicks
-NUM_CLICKS times instead (5 by default) and asserts the real value after
-clicking is exactly `initial + NUM_CLICKS`, generalizing the same "no
-more, no less" check the spec applies to one click.
-
-Clicking the short URL (steps 11-13): opened in a dedicated, SEPARATE
-browser context (browser.new_context(ignore_https_errors=True)), not a
-new tab in logged_in_page's own context -- a real end user clicking this
-link from an SMS is anonymous traffic, never meant to carry the admin's
-authenticated session, so giving it its own context is more correct, not
-just a side-effect of the fix below. ignore_https_errors=True was added
-after a real pytest run (with the requestfailed-based diagnostics in
-_goto_with_cert_fallback) proved the short-link host serves a certificate
-that doesn't match its hostname (net::ERR_CERT_COMMON_NAME_INVALID) --
-confirmed as a cert-interstitial problem specifically, not a dead link,
-because manually pasting the same URL into a real Chrome tab (where a
-human can click through the "not private" warning) does increase the
-click count, while Playwright's automated browser has no human to click
-through that interstitial and fails the navigation instead. This context
-is closed right after the clicks, never reused for anything else. A
-genuine browser navigation (page.goto), not a raw HTTP request -- matches
-"click/open the short URL" and lets Playwright's own redirect-following
-confirm "the URL redirects successfully" via the final page.url differing
-from the short URL requested.
-
-DLR-after-click (step 16): re-checks the SAME message_id with
-utils/dlr_helpers.poll_for_dlr() (the standard single-id DLR poll used
-everywhere else in this suite) after the click, asserting received is
-still true -- proving the click didn't disturb DLR state, not re-deriving
-DLR status_code/provider_status (still deliberately not validated
-anywhere in this test, per the spec).
-"""
 
 import re
 import time
 
 import pytest
 
-from pages.sms.sms_campaign_page import SMSCampaignPage
+from pages.sms.campaigns.sms_campaign_page import SMSCampaignPage
 from pages.sms.campaigns.sms_campaign_message_report_page import SmsCampaignMessageReportPage
 from utils.campaign_dlr import verify_campaign_dlrs
 from utils.config import Config
@@ -156,29 +70,6 @@ def _navigable_url(short_url):
 
 
 def _goto_with_cert_fallback(page, url, had_scheme, timeout=30000):
-    """Navigates to *url*, returning the URL actually used.
-
-    If the app's message literally had NO scheme of its own (so
-    "https://" was only added by _navigable_url(), never sent by the
-    app) and the navigation fails with a CERTIFICATE error, retries once
-    over plain http:// -- a real, CONFIRMED staging-environment quirk
-    (net::ERR_CERT_COMMON_NAME_INVALID on the short-link host, from an
-    actual pytest run against it), not a blanket bypass of certificate
-    checks: a scheme the app itself sent (an explicit https:// URL in the
-    message body) is never downgraded, and a non-certificate failure is
-    never retried.
-
-    DIAGNOSTICS: page.goto() raising "interrupted by another navigation
-    to chrome-error://chromewebdata/" means Chromium substituted its own
-    network-error interstitial for SOME navigation in the chain (the
-    short link itself, or wherever it redirects to) -- that message
-    alone never says which hop failed or why (DNS, connection refused,
-    blocked by a filter/proxy, TLS failure, ...). To stop guessing on the
-    next failure, this listens for Playwright's own 'requestfailed'
-    event (which carries Chromium's real net::ERR_* reason per URL) for
-    the duration of the navigation and folds whatever it captured into
-    the raised exception's message.
-    """
     failures = []
 
     def _on_request_failed(request):

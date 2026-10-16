@@ -83,6 +83,11 @@ from pages.whatsapp.whatsapp_campaign_create_page import WhatsAppCampaignCreateP
 # channels' E2E suites) instead of a hand-rolled uuid/timestamp.
 from pages.whatsapp.whatsapp_campaign_page import WhatsAppCampaignPage
 from utils.parallel import unique_name
+# DLR verification for the E2E "Send Now" test below -- added 2026-10-11,
+# wired into the EXISTING test_e2e_whatsapp_campaign_creation_and_persistence
+# rather than a new test case (see utils/whatsapp_campaign_dlr.py's module
+# docstring for the full flow/contract this reuses from SMS/RCS).
+from utils.whatsapp_campaign_dlr import verify_whatsapp_campaign_dlrs
 
 
 pytestmark = [pytest.mark.whatsapp, pytest.mark.campaign]
@@ -810,7 +815,7 @@ def _verify_campaign_in_listing(module_logged_in_page, campaign_name):
 # TC20 -- Complete WhatsApp Campaign E2E (copy-paste contacts)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_e2e_whatsapp_campaign_creation_and_persistence(module_logged_in_page):
+def test_e2e_whatsapp_campaign_creation_and_persistence(module_logged_in_page, api_client, record_property):
     campaign_name = unique_name("E2E WhatsApp Campaign", max_len=63)  # app-confirmed 63-char cap
 
     create = WhatsAppCampaignCreatePage(module_logged_in_page)
@@ -867,6 +872,20 @@ def test_e2e_whatsapp_campaign_creation_and_persistence(module_logged_in_page):
     )
 
     _verify_campaign_in_listing(module_logged_in_page, campaign_name)
+
+    # DLR verification -- this campaign sent to 2 recipients above
+    # ("918123456780\n918123456781"), so expect 2 DLR-bearing rows.
+    # Reuses the same GET {dlr_base_url}/api/v1/dlr/{message_id} endpoint
+    # SMS/RCS DLR tests already use (api_client fixture, see this
+    # directory's conftest.py), per the project owner's explicit
+    # instruction (2026-10-11). Never silently skipped: any recipient
+    # whose message id can't be captured, or whose DLR is missing/
+    # mismatched/rejected, fails this test with a precise, named reason
+    # (see utils/whatsapp_campaign_dlr.py).
+    verify_whatsapp_campaign_dlrs(
+        module_logged_in_page, api_client, campaign_name,
+        record_property=record_property, expected_recipients=2,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

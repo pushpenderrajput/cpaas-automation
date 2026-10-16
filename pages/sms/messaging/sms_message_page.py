@@ -472,6 +472,20 @@ class SMSMessagePage(BasePage):
             pass
         self.page.wait_for_timeout(600)
 
+        # Enforce Livewire array value directly to ensure server-side filtering
+        # is synchronized, matching set_filter_status pattern.
+        actuals = [self._STATUS_ALIAS.get(str(l).lower(), str(l)) for l in labels]
+        try:
+            self.page.evaluate(
+                "(actuals) => { window.Livewire && window.Livewire.all().forEach(function(c) {"
+                "  try { c.set('filterComponents.status', actuals); } catch(e) {}"
+                "}); }",
+                actuals
+            )
+            self.page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
     def _set_precise_date_time(self, wrapper_selector, date_str, time_str):
         """date_str: 'YYYY-MM-DD'. time_str: 'HH:MM', MUST be one of the
         real 5-minute-increment option values confirmed in the filter

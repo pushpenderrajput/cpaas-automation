@@ -844,7 +844,7 @@ def test_TC041_launch_campaign(campaign_create_page):
 
     # Template
     try:
-        campaign_create_page.select_template_by_index(1)
+        _select_default_template(campaign_create_page)
     except Exception:
         pass
 
@@ -911,7 +911,7 @@ def test_TC042_launch_Schedule_campaign(campaign_create_page):
 
     # Template
     try:
-        campaign_create_page.select_template_by_index(1)
+        _select_default_template(campaign_create_page)
     except Exception:
         pass
 
@@ -967,7 +967,7 @@ def test_e2ecopypastenumber_send_now(campaign_create_page, api_client, record_pr
 
     # Template
     try:
-        campaign_create_page.select_template_by_index(1)
+        _select_default_template(campaign_create_page)
     except Exception:
         pass
 
@@ -1073,7 +1073,7 @@ def test_e2ecopypastenumber_schedule_same_day_next_3_hours(campaign_create_page)
 
     # Template
     try:
-        campaign_create_page.select_template_by_index(1)
+        _select_default_template(campaign_create_page)
     except Exception:
         pass
 
@@ -1139,7 +1139,7 @@ def test_TC043_launch_file_upload_send_now(campaign_create_page):
 
     # Template
     try:
-        campaign_create_page.select_template_by_index(1)
+        _select_default_template(campaign_create_page)
     except Exception:
         pass
 
@@ -1244,7 +1244,7 @@ def test_e2efileupload_schedule_same_day_next_3_hours(campaign_create_page):
 
     # Template
     try:
-        campaign_create_page.select_template_by_index(1)
+        _select_default_template(campaign_create_page)
     except Exception:
         pass
 
@@ -1370,6 +1370,36 @@ def _select_default_agent(page):
         return False
 
 
+def _select_default_template(page):
+    """Select the suite's configured default RCS template --
+    Config.RCS_CAMPAIGN_TEMPLATE_NAME -- mirroring _select_default_agent()'s
+    same named-value-with-index-fallback pattern (added 2026-10-10, same
+    request: use a deterministic template instead of whatever happens to
+    sort first for the currently selected agent, which can vary as
+    templates get created/deleted). Falls back to index 1 when the name is
+    unset or not present for the currently selected agent, so this
+    introduces no new failure mode -- every caller's existing 'no template
+    available -> skip/best-effort' resilience is unchanged, just pointed
+    at a deterministic template first.
+
+    NOT used by test_TC054_template_cleared_when_agent_changes /
+    test_TC059_change_template_selection (they deliberately select two
+    DIFFERENT templates by index to prove switching/clearing works --
+    forcing both picks to the same named template would break the thing
+    those tests exist to verify)."""
+    name = Config.RCS_CAMPAIGN_TEMPLATE_NAME
+    if name:
+        try:
+            if page.select_template_by_visible_text(name):
+                return True
+        except Exception:
+            pass
+    try:
+        return page.select_template_by_index(1)
+    except Exception:
+        return False
+
+
 def _try_select_agent_and_template(page):
     """Best-effort setup shared by many tests below: select the suite's
     default agent (Config.RCS_AGENT_NAME, 'agentsim' -- see
@@ -1383,7 +1413,7 @@ def _try_select_agent_and_template(page):
         pass
     template_ok = False
     try:
-        template_ok = page.select_template_by_index(1)
+        template_ok = _select_default_template(page)
     except Exception:
         pass
     return agent_ok, template_ok

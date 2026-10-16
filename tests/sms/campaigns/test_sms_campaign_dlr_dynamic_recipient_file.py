@@ -1,146 +1,3 @@
-"""
-test_sms_campaign_dlr_dynamic_recipient_file.py
-
-End-to-end SMS Campaign DLR verification test with a DYNAMIC recipient
-file, built from the project owner's own full 15-section spec (reproduced
-section-by-section in the comments below). The spec's explicit,
-non-negotiable rules:
-
-  - No fixed/hardcoded recipient file inside the test -- it is supplied
-    dynamically via the SMS_DLR_RECIPIENT_FILE environment variable, and
-    the SAME test code must work unmodified for a ~1K, ~10K, or ~100K
-    recipient file.
-  - No hardcoded recipient numbers, message IDs, or expected DLR counts
-    anywhere -- every count is computed from the actual input file and
-    the actual campaign export.
-  - DLR verification reuses the existing DLR Receiver
-    (utils/dlr_helpers.py) -- DLRs are never generated manually by this
-    automation.
-  - Delivery completion is polled (configurable timeout/interval), never
-    a single fixed sleep.
-  - Every missing/unmatched/duplicate DLR record is reported, not just
-    the first failure.
-
-Building blocks, all reused from already-confirmed, already-passing
-infrastructure in this suite -- nothing here is a new/unconfirmed
-locator:
-
-  Section 1-2 (Dynamic Recipient File / Validate Input File):
-    utils/sms_dlr_dynamic_recipient.py::read_and_validate_recipient_file()
-    -- reuses utils/file_validator.read_file_rows() (the project's
-    existing generic .csv/.xlsx/.xls/.zip reader) and the SAME recipient-
-    number format rule already confirmed in
-    tests/sms/messaging/test_sms_message_flow.py (~line 860):
-    `value.isdigit() and 7 <= len(value) <= 15`.
-
-  Section 3 (Create and Send SMS Campaign):
-    SMSCampaignPage (pages/sms/campaigns/sms_campaign_page.py) --
-    the exact Name -> Sender ID -> Template (best-effort) -> Import
-    Contacts (File Upload) -> Send Now -> Preview -> Launch Campaign ->
-    success-signal sequence already used by test_campaign_creation.py::
-    test_TC_C021_launch_campaign and test_sms_campaign_dlr_bulk.py::
-    _create_and_launch_send_now_campaign() (adapted here only to swap
-    the copy-paste contacts step for the dynamic file-upload step -- the
-    rest of the sequence is identical, not reinvented). The file-upload
-    step itself composes click_import_contact() ->
-    SMSCampaignPage.upload_contact_file(filepath) (which already drives
-    the File Upload tab + the column-mapping dropdowns that appear for a
-    multi-column recipient file, e.g. a phone column plus template-
-    variable columns) -> the same duplicate-checkbox + click_import_
-    confirm() steps import_contacts_from_csv() uses -- not a new
-    locator, a different confirmed combination of two existing ones.
-
-  Section 4 (Wait for Delivery):
-    utils/sms_dlr_dynamic_recipient.py::wait_for_delivery_complete() --
-    applies the real, confirmed "Pending" filter by navigating to the
-    "DLR Awaited" stat card's own metric-filtered table view
-    (SmsCampaignMessageReportPage.CARD_NAME_TO_METRIC["DLR Awaited"] ==
-    "dlr-awaited" -- the SAME URL that card's onclick navigates to,
-    confirmed in pages/sms/campaigns/sms_campaign_message_report_page.py)
-    and polls that filtered table's own row count
-    (has_no_records_message()/get_row_count()) toward 0 -- i.e. "nothing
-    Pending" -- rather than trusting the stat card's displayed digits.
-    The stat card value is still recorded alongside each poll purely for
-    diagnostic logging. One table load per poll, not a per-recipient
-    walk, so it stays cheap at 100K scale.
-
-  Section 5-7 (Export / Verify Recipient Count / Message ID Collection):
-    utils/sms_dlr_dynamic_recipient.py::
-    collect_message_records_from_messages_log() -- once Section 4
-    confirms nothing is left in Sent/Pending, this goes to the SMS
-    Messages Log page (NOT the Campaign Report's own Export, which is
-    confirmed by a real downloaded sample to have NO Message Id column
-    -- see pages/sms/campaigns/sms_campaign_message_report_page.py /
-    constants/sms/reports -- and NOT the SMS Download Center) and
-    applies the real, confirmed filters: DLT Template ID (captured
-    dynamically via capture_campaign_dlt_template_id(), which opens the
-    Campaign Report's own row-0 View popup -- the SAME Livewire modal
-    the Messages page itself uses -- rather than ever being hardcoded),
-    Sender ID, Source = Campaign, Status in {DELIVRD, FAILED, REJECTED}
-    (the terminal/non-pending statuses), and a precise Received From/To
-    window bounding this run's own campaign-launch and delivery-wait-
-    complete timestamps (floor_to_5min()/ceil_to_5min()-rounded to the
-    real 5-minute-increment time-select options confirmed on that
-    filter). The filtered result set is then exported via
-    SMSMessagePage.export() -- already confirmed working and already
-    validated by test_sms_message_flow.py against
-    constants.sms_message_headers.EXPECTED_SMS_MESSAGE_HEADERS, which
-    includes both "Message Id" and "Mobile Number".
-
-  Section 8 (Verify DLRs):
-    utils/sms_dlr_dynamic_recipient.py::verify_bulk_dlrs_chunked() --
-    calls utils/dlr_helpers.py::poll_bulk_dlr() (the EXACT helper already
-    used by test_sms_campaign_dlr_bulk.py), chunked
-    (SMS_DLR_VERIFY_BATCH_SIZE) as a flagged, undocumented-API-limit
-    safety measure for 100K-scale runs -- never a manually-generated DLR.
-
-  Section 9-10 (Recipient-to-DLR Correlation / Complete DLR Coverage):
-    utils/sms_dlr_dynamic_recipient.py::correlate_message_records() +
-    unmatched_dlr_message_ids(). See that module's own docstring for an
-    HONESTLY FLAGGED GAP: the bulk DLR verify response has no
-    independently confirmed recipient/phone field (only
-    received/message_id/correlation_id are confirmed -- see
-    utils/dlr_helpers.py's own docstring), so recipient-level correlation
-    is enforced via message_id itself as the join key (message_id is
-    already paired 1:1 with its recipient at export time), and
-    "Recipient Mismatches" reports 0 whenever the API carries no
-    recipient field to actually compare -- not a fabricated guess.
-
-  Section 11-15 (Final Validation / Failure Report):
-    This test's own assertions + utils/sms_dlr_dynamic_recipient.py::
-    build_summary_text() / build_failure_table(), producing the EXACT
-    summary format the spec requires.
-
-Env configuration (all configurable, matching the SAME env-var pattern
-already established by utils/campaign_dlr.py's
-SMS_CAMPAIGN_DLR_VERIFY/SMS_CAMPAIGN_DLR_TIMEOUT/
-SMS_CAMPAIGN_REPORT_TIMEOUT):
-
-  SMS_DLR_RECIPIENT_FILE     Path to the dynamic recipient file. REQUIRED
-                             -- the test is skipped with a clear message
-                             if unset, rather than falling back to any
-                             fixed file.
-  DLR_WAIT_TIMEOUT           Seconds to wait for delivery (DLR Awaited ->
-                             0) before giving up. Default 1800 (30 min).
-  DLR_POLL_INTERVAL          Seconds between delivery-completion polls.
-                             Default 20.
-  SMS_DLR_EXPORT_TIMEOUT     Seconds to wait for the SMS Messages Log
-                             export (SMSMessagePage.export()) to produce
-                             a real downloaded file. Default 900.
-  SMS_DLR_VERIFY_TIMEOUT     Seconds to wait for all DLRs to be received
-                             per bulk-verify chunk. Default 180 (same
-                             default as DLR_POLL_TIMEOUT_SECONDS in
-                             utils/dlr_helpers.py).
-  SMS_DLR_VERIFY_BATCH_SIZE  Max message_ids per bulk-verify call.
-                             Default 1000 -- see module docstring's
-                             flagged engineering choice.
-
-Per the spec, this test must NOT proceed to DLR verification if campaign
-creation/sending fails, or if the campaign-report export does not
-contain the expected number of records (unless the recipient file's own
-duplicate/invalid-number counts explain the difference) -- both are
-enforced below as hard assertions before any DLR call is made.
-"""
 
 import os
 import time
@@ -148,9 +5,9 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from pages.sms.sms_campaign_page import SMSCampaignPage
-from pages.sms.sms_campaign_message_report_page import SmsCampaignMessageReportPage
-from pages.sms.sms_message_page import SMSMessagePage
+from pages.sms.campaigns.sms_campaign_page import SMSCampaignPage
+from pages.sms.campaigns.sms_campaign_message_report_page import SmsCampaignMessageReportPage
+from pages.sms.messaging.sms_message_page import SMSMessagePage
 from utils.config import Config
 from utils.dlr_format_validator import (
     aggregate_bulk_dlr_validation,
@@ -160,6 +17,7 @@ from utils.sms_dlr_dynamic_recipient import (
     build_failure_table,
     build_summary_text,
     capture_campaign_dlt_template_id,
+    capture_campaign_popup_details,
     ceil_to_5min,
     collect_message_records_from_messages_log,
     correlate_message_records,
@@ -376,8 +234,10 @@ def test_sms_campaign_dlr_dynamic_recipient_file(
     # window covering this run, then export that filtered log (its own
     # export is confirmed to carry Message Id, unlike the Campaign
     # Report's own export).
-    dlt_template_id = capture_campaign_dlt_template_id(report_page)
+    dlt_template_id, msg_prefix = capture_campaign_popup_details(report_page, campaign_id)
     record_property("DLT Template ID (captured)", dlt_template_id)
+    if msg_prefix:
+        record_property("Message ID Batch Prefix (captured)", msg_prefix)
 
     from_dt = floor_to_5min(run_start_dt)
     to_dt = ceil_to_5min(run_end_dt)
@@ -391,6 +251,8 @@ def test_sms_campaign_dlr_dynamic_recipient_file(
         from_dt,
         to_dt,
         export_timeout_ms=EXPORT_TIMEOUT * 1000,
+        expected_recipients=file_result.unique_recipients,
+        message_id_prefix=msg_prefix,
     )
     record_property("Export File", download_path)
     record_property("Campaign Export Records", str(len(matched_rows)))

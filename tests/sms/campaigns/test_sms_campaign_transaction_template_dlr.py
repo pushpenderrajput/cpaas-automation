@@ -23,7 +23,7 @@ import time
 
 import pytest
 
-from pages.sms.sms_campaign_page import SMSCampaignPage
+from pages.sms.campaigns.sms_campaign_page import SMSCampaignPage
 from utils.campaign_dlr import verify_campaign_dlrs
 from utils.config import Config
 

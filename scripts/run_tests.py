@@ -152,6 +152,7 @@ reruns a failed item on whichever worker ran it, so parallel execution,
 loadscope module-affinity, and everything else in this file are
 unaffected.
 """
+import ast
 import os
 import subprocess
 import sys
@@ -220,6 +221,119 @@ def _apply_instance() -> str | None:
     raise SystemExit(2)
 
 
+# Auto-detected (not hand-maintained): a test file needs --dist loadscope
+# only when it actually depends on a shared, module-scoped browser page --
+# conftest.py's `module_logged_in_page` / `module_page` fixtures, which
+# the project's "single sequential flow" files request as a parameter so
+# later tests in the module can act on state an earlier test in the SAME
+# module left behind. A file that never asks for either fixture has no
+# such dependency: every test gets its own fresh, function-scoped page
+# (`logged_in_page`/`page`), so pinning the whole file to one worker only
+# costs parallelism without buying correctness.
+#
+# Scoped to tests/sms and tests/rcs only, per request -- other channels
+# (whatsapp/email/common) keep the unconditional loadscope default below
+# unless/until this is extended to them too.
+AUTO_DETECT_DIST_ROOTS = ("tests/sms", "tests/rcs")
+MODULE_SCOPE_FIXTURES = {"module_logged_in_page", "module_page"}
+_PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+
+def _normalize_path(a: str) -> str:
+    """"tests\\rcs\\campaigns\\test_x.py" -> "tests/rcs/campaigns/test_x.py" --
+    same slash/strip normalization _channel_label() below already uses,
+    pulled out so _is_parallel_safe() can reuse it too."""
+    return a.replace("\\", "/").strip("/")
+
+
+def _under_auto_detect_roots(norm_path: str) -> bool:
+    return any(
+        norm_path == root or norm_path.startswith(root + "/")
+        for root in AUTO_DETECT_DIST_ROOTS
+    )
+
+
+def _collect_test_files(norm_path: str):
+    """Resolves one forwarded positional path (already normalized, node-id
+    suffix already stripped) to the real .py test file(s) it refers to,
+    relative to the project root. Returns None if the path doesn't exist
+    on disk -- the caller treats that conservatively (can't verify safety
+    of something it can't read), not as "safe by default"."""
+    abs_path = os.path.join(_PROJECT_ROOT, norm_path)
+    if os.path.isfile(abs_path):
+        return [norm_path] if norm_path.endswith(".py") else None
+    if os.path.isdir(abs_path):
+        files = []
+        for dirpath, _dirs, filenames in os.walk(abs_path):
+            for fn in filenames:
+                if fn.startswith("test_") and fn.endswith(".py"):
+                    rel = os.path.relpath(os.path.join(dirpath, fn), _PROJECT_ROOT)
+                    files.append(rel.replace("\\", "/"))
+        return files
+    return None
+
+
+def _file_needs_loadscope(rel_path: str) -> bool:
+    """True if `rel_path` (relative to the project root) has ANY function
+    or fixture whose parameter list includes a module-scoped shared-page
+    fixture (see MODULE_SCOPE_FIXTURES) -- i.e. the exact in-file ordering
+    dependency --dist loadscope exists to protect. Reads the real AST
+    rather than grepping for the fixture name, so a docstring that merely
+    MENTIONS "module_logged_in_page" in passing (e.g. explaining why a
+    file does NOT need it) is never mistaken for an actual dependency.
+    Fails safe (returns True -- "needs loadscope") on any read/parse
+    error, so a file this can't actually inspect is never silently
+    treated as parallel-safe."""
+    abs_path = os.path.join(_PROJECT_ROOT, rel_path)
+    try:
+        with open(abs_path, encoding="utf-8") as f:
+            src = f.read()
+        tree = ast.parse(src)
+    except (OSError, SyntaxError):
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            params = {a.arg for a in node.args.args + node.args.kwonlyargs}
+            if params & MODULE_SCOPE_FIXTURES:
+                return True
+    return False
+
+
+def _is_parallel_safe(forwarded: list) -> bool:
+    """True only when EVERY requested test path:
+      1. falls under tests/sms/ or tests/rcs/ (AUTO_DETECT_DIST_ROOTS --
+         this auto-detection is deliberately scoped to those two channels
+         only, per request), AND
+      2. resolves to real .py test file(s) on disk (a path that doesn't
+         exist can't be inspected, so it's treated as unsafe), AND
+      3. none of those files have a module_logged_in_page/module_page
+         fixture dependency (see _file_needs_loadscope()).
+    False for a bare `-k`/`-m` selection with no path at all (could still
+    be selecting tests out of an unsafe file elsewhere in the suite), and
+    false the moment ANY one of several requested paths is unsafe/
+    unverifiable -- mixing a safe file with an unsafe one still needs
+    loadscope for the unsafe one, and pytest-xdist has no "loadscope for
+    this file, load for that one" middle ground, so the safer default
+    wins."""
+    paths = [a for a in forwarded if not a.startswith("-")]
+    if not paths:
+        return False
+    for a in paths:
+        # Strip a node-id's "::TestClass::test_name" suffix (e.g.
+        # "tests/rcs/campaigns/test_x.py::test_e2ecopypastenumber_send_now")
+        # before resolving -- selecting one test/class out of a safe file
+        # is still entirely within that file.
+        norm = _normalize_path(a.split("::", 1)[0])
+        if not _under_auto_detect_roots(norm):
+            return False
+        files = _collect_test_files(norm)
+        if files is None:
+            return False
+        if any(_file_needs_loadscope(f) for f in files):
+            return False
+    return True
+
+
 def _channel_label(forwarded: list) -> str:
     """Best-effort channel label for the CI banner (CI/CD work,
     requirement #20) -- same derivation as conftest.py's
@@ -251,6 +365,21 @@ def _test_type_label(forwarded: list) -> str:
         if a.startswith("--markexpr="):
             return a[len("--markexpr="):]
     return "full"
+
+
+def _extract_opt_value(args: list, flag: str):
+    """Reads the value of a `--flag value` or `--flag=value` CLI option
+    out of `args` (either the user's forwarded argv or this script's own
+    `extra` list) -- used to find whichever --junitxml path is ACTUALLY
+    going to be used for this run, so the post-run Excel report (CI/CD
+    reporting work, "also provide a report in Excel format") reads the
+    SAME JUnit file pytest itself just wrote, not a guessed path."""
+    for i, a in enumerate(args):
+        if a == flag and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(flag + "="):
+            return a[len(flag) + 1:]
+    return None
 
 
 def _validate_config(channel=None, test_type=None, workers=None) -> int:
@@ -329,12 +458,18 @@ def main() -> int:
             has_dash_n = True
 
     if has_dash_n and not has_dist:
-        # loadscope: keep every test from one module (and therefore every
-        # module-scoped "single sequential flow" test file this suite is
-        # built on) on ONE worker, in file order. Required for correctness,
-        # not just speed — those files rely on state earlier tests in the
-        # same file left behind.
-        extra += ["--dist", "loadscope"]
+        if _is_parallel_safe(forwarded):
+            # Every requested path is on PARALLEL_SAFE_PATHS -- no in-file
+            # test ordering to protect here, so round-robin every test
+            # across all workers instead of pinning the whole file to one.
+            extra += ["--dist", "load"]
+        else:
+            # loadscope: keep every test from one module (and therefore every
+            # module-scoped "single sequential flow" test file this suite is
+            # built on) on ONE worker, in file order. Required for correctness,
+            # not just speed — those files rely on state earlier tests in the
+            # same file left behind.
+            extra += ["--dist", "loadscope"]
 
     has_reruns = any(
         a == "--reruns" or a.startswith("--reruns=") for a in forwarded
@@ -364,6 +499,17 @@ def main() -> int:
         if not has_junit:
             extra += ["--junitxml", os.path.join(Config.REPORTS_DIR, "junit.xml")]
 
+    # Resolve the JUnit path THIS run will actually produce, so the Excel
+    # report generated below reads the right file regardless of whether
+    # it came from an explicit CLI --junitxml, the INSTANCE-scoped default
+    # just added to `extra`, or pytest.ini's own flat
+    # `--junitxml=reports/junit.xml` (addopts) when neither applies.
+    junit_path_for_excel = (
+        _extract_opt_value(forwarded, "--junitxml")
+        or _extract_opt_value(extra, "--junitxml")
+        or os.path.join(_PROJECT_ROOT, "reports", "junit.xml")
+    )
+
     cmd = [sys.executable, "-m", "pytest"] + forwarded + extra
     print(f"[run_tests] INSTANCE={instance if instance else '(unset -> ENV/ENV_NAME independent)'}  "
           f"ENV={os.environ.get('ENV', '(unset -> qa default)')}  "
@@ -373,7 +519,36 @@ def main() -> int:
           f"RERUNS={reruns_value if reruns_value is not None else '(explicit --reruns on command line)'}  "
           f"RUN_ID={run_id if run_id else '(n/a -- no INSTANCE)'}")
     print(f"[run_tests] {' '.join(cmd)}")
-    return subprocess.call(cmd)
+    exit_code = subprocess.call(cmd)
+
+    # Excel report (CI/CD reporting work, "also provide a report in Excel
+    # format" whenever the suite is run) -- generated AFTER pytest exits,
+    # pass or fail, from the same JUnit file pytest just wrote. Written
+    # right beside it so it is just as easy to find as the existing HTML/
+    # JUnit reports. Never affects `exit_code`: a report-generation
+    # problem (missing openpyxl, pytest crashed before writing any JUnit
+    # file, etc.) only prints a warning -- see generate_excel_report.py.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/ itself (idempotent)
+        from generate_excel_report import generate_excel_report
+        xlsx_path = os.path.splitext(junit_path_for_excel)[0] + ".xlsx"
+        # "junit.xml" -> "test_report.xlsx" (matches the existing HTML
+        # report's own name) rather than "junit.xlsx", which would read
+        # as a second, confusingly-named JUnit file.
+        xlsx_dir = os.path.dirname(junit_path_for_excel)
+        xlsx_path = os.path.join(xlsx_dir, "test_report.xlsx") if xlsx_dir else "test_report.xlsx"
+        generate_excel_report(
+            junit_path_for_excel, xlsx_path,
+            meta={
+                "run_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "env": os.environ.get("ENV", ""),
+                "instance": instance or "",
+            },
+        )
+    except Exception as e:  # pragma: no cover -- defensive, see above
+        print(f"[run_tests] WARNING: Excel report generation failed ({e}) -- test results/exit code above are unaffected.", file=sys.stderr)
+
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ import os
 import pytest
 from datetime import datetime, timedelta
 
-from pages.sms.sms_campaign_page import SMSCampaignPage
+from pages.sms.campaigns.sms_campaign_page import SMSCampaignPage
 from utils.test_data_generator import generate_all, DATA_DIR
 from utils.config import Config
 
