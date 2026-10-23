@@ -188,6 +188,10 @@ def _open_first_campaign_report(campaign_page, report_page):
     if not report_page.is_report_page():
         return False
     report_page.wait_for_table_load()
+    # Stat cards can be populated by a separate Livewire round-trip from
+    # the message table -- wait for the confirmed #campaign-stats-wrap
+    # container before any caller starts checking individual cards.
+    report_page.wait_for_cards_loaded()
     return True
 
 
@@ -532,10 +536,19 @@ def test_TC045_restore_hidden_columns(campaign_page, report_page):
 # -- Export (RCS_RPT_046-047, scoped -- see module docstring) ---------------
 
 def test_TC046_export_csv_button_visible(campaign_page, report_page):
-    """RCS_RPT_046: Verify the Export CSV button/link is displayed."""
+    """RCS_RPT_046: Verify the Export CSV button/link is displayed.
+
+    timeout bumped 8000 -> 20000: a live run showed this failing while
+    every other check on the SAME loaded report page (stat cards via
+    wait_for_cards_loaded(), click_export_csv()'s own 10000ms wait)
+    passed -- is_element_visible() and wait_for_element_clickable() are
+    the identical underlying wait (utils/helpers.py), so this was never
+    a locator problem, just a narrower budget than this project's own
+    20000ms default (Config.EXPLICIT_WAIT_MS, used everywhere else on
+    this same page) for an element that can render async."""
     if not _open_first_campaign_report(campaign_page, report_page):
         pytest.skip("No RCS Campaign row/Reports link available to open a report for.")
-    assert report_page.is_element_visible(report_page.EXPORT_CSV_LINK, timeout=8000)
+    assert report_page.is_element_visible(report_page.EXPORT_CSV_LINK, timeout=20000)
 
 
 def test_TC047_export_downloads_file(campaign_page, report_page):

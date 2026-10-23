@@ -18,4 +18,5 @@ EXPECTED_RCS_MESSAGE_TYPE_ANALYTICS_HEADERS = [
     "CTA Total Clicks",
     "CTA Unique Clicks",
     "Total Charges",
+    "Delivered Charges",
 ]

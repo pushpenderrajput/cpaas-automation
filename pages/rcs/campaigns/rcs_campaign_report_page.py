@@ -124,22 +124,61 @@ class RCSCampaignReportPage(BasePage):
         "CTA Unique Clicks", "CTA Total Clicks", "User Replies",
     )
 
+    # CONFIRMED real DOM (2026-10-22, real pasted markup -- not a
+    # screenshot this time, the actual HTML):
+    #   <div id="campaign-stats-wrap">
+    #     <div class="stats-row stats-r7">
+    #       <div onclick="..." class="stats-card stats-clickable">
+    #         <div class="stats-header">
+    #           <span class="stats-label">Total Messages</span>
+    #           <div class="stats-icon ..."><i class="mdi ..."></i></div>
+    #         </div>
+    #         <div class="stats-value">11</div>
+    #         <div class="stats-bottom-label">Total Messages</div>
+    #       </div>
+    #       ...
+    #     </div>
+    #     <div class="stats-row stats-r6"> ... </div>
+    #   </div>
+    # A prior fix here switched to scoping on the confirmed `.stats-card`
+    # class (progress -- that part was right), but still matched the
+    # label via `.//p[...]`, carried over unexamined from the old,
+    # unconfirmed xpath it replaced. This real markup has NO `<p>`
+    # anywhere: the label is `<span class="stats-label">`, and the value
+    # is a SEPARATE sibling `<div class="stats-value">` (there's also a
+    # `.stats-bottom-label` div with the same text, so matching is scoped
+    # to `.stats-label` specifically to avoid ambiguity). That's why
+    # every card still failed "not visible" after the previous fix --
+    # the `<p>` predicate matched nothing, full stop, regardless of
+    # timing. Both `_card_by_label_xpath` and `get_card_value` are fixed
+    # to use the real structure below.
+    CARDS_WRAP = "#campaign-stats-wrap"
+
     def _card_by_label_xpath(self, name):
-        """Same confirmed direct-child nesting already established for
-        the sibling SMS report page's stat cards -- see
-        SmsCampaignMessageReportPage._card_by_label_xpath()'s docstring
-        for why matching the label as a direct child (not a `.//p`
-        descendant) is required to land on the real card div rather
-        than an outer container."""
-        return f"xpath=//div[p[normalize-space(text())='{name}']]/../.."
+        return (
+            "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), ' stats-card ')]"
+            "[.//span[contains(concat(' ', normalize-space(@class), ' '), ' stats-label ')]"
+            f"[normalize-space(text())='{name}']]"
+        )
+
+    def wait_for_cards_loaded(self, timeout=20000):
+        """Wait for the confirmed stat-cards wrapper to attach. Stat
+        cards can be populated by a separate Livewire round-trip from
+        the message table, so this is called once after navigating to
+        the report page (see _open_first_campaign_report() in the test
+        module) rather than relying on each individual card check's own
+        shorter timeout to also cover the initial render race."""
+        try:
+            self.page.locator(self.CARDS_WRAP).wait_for(state="attached", timeout=timeout)
+        except Exception:
+            pass
 
     def is_card_visible(self, name):
         return self.is_element_visible(self._card_by_label_xpath(name), timeout=8000)
 
     def get_card_value(self, name):
         card = self.h.wait_for_element_visible(self._card_by_label_xpath(name))
-        paragraphs = card.locator("p")
-        return paragraphs.nth(1).inner_text().strip()
+        return card.locator(".stats-value").first.inner_text().strip()
 
     # -- Search / filter --------------------------------------------------------
 
@@ -445,7 +484,9 @@ class RCSCampaignReportPage(BasePage):
     # -- Export -------------------------------------------------------------------
 
     EXPORT_CSV_LINK = (
-        "xpath=//a[contains(@href,'/messages/export') and contains(normalize-space(.),'Export CSV')]"
+        "xpath=(//a | //button)[contains(normalize-space(.),'Export CSV')]"
+        " | //a[contains(@href,'export') and contains(normalize-space(.),'Export')]"
+        " | //button[contains(normalize-space(.),'Export')]"
     )
 
     def get_export_csv_href(self):

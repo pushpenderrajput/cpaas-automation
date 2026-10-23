@@ -164,6 +164,54 @@ def reset_filters(p: RcsDownloadCenterPage):
     p.wait_for_table_load(timeout=10000)
 
 
+def _ensure_completed_report(download_center_page, report_name, days,
+                              timeout_s=90, poll_interval_s=3):
+    """
+    Make sure a report named `report_name` exists and has reached
+    'completed' status, creating it (via _create_date_range_report,
+    defined below) if no row with that name exists yet. Polls by
+    re-searching rather than trusting a single snapshot, since a
+    freshly-created report starts 'pending'/'processing' and only later
+    flips to 'completed' -- or to 'failed'.
+
+    Returns the row index (within the name-filtered table) of the first
+    'completed' row found, or None if the report never reaches
+    'completed' (or reaches 'failed') within `timeout_s`.
+
+    Ported from the SMS Download Center's own _ensure_completed_report(),
+    added here for the same reason: TC_10 used to apply a generic
+    status=Completed filter and grab row 0, trusting whatever report
+    happened to be first. A real run of this suite showed one of the
+    large, multi-day automated reports (TestTC20Report20Days's own
+    "Automated Report - 20 Days") can genuinely come back with status
+    'failed' on this backend -- so a generic Completed-filtered row 0
+    isn't just slow in the worst case, it can be the WRONG kind of row
+    entirely for a download test. Targeting one specific, small (1-day)
+    report by name avoids both problems regardless of what other reports
+    exist in the account.
+    """
+    ensure_on_dc_page(download_center_page)
+    download_center_page.search(report_name)
+    download_center_page.page.wait_for_timeout(1000)
+
+    if download_center_page.get_row_count() == 0:
+        download_center_page.clear_search()
+        _create_date_range_report(download_center_page, report_name, days)
+        download_center_page.search(report_name)
+        download_center_page.page.wait_for_timeout(1000)
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        download_center_page.search(report_name)
+        row_idx = download_center_page.find_row_with_status("completed")
+        if row_idx >= 0:
+            return row_idx
+        if download_center_page.find_row_with_status("failed") >= 0:
+            return None
+        time.sleep(poll_interval_s)
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Disposable-report fixture — so delete-flow tests create their OWN row
 # ══════════════════════════════════════════════════════════════════════════════
@@ -575,32 +623,74 @@ class TestTC09ViewModal:
 class TestTC10Download:
     """TC_10: Clicking Download on a Completed report downloads a file."""
 
+    # Deliberately a SMALL (1-day) report, not whatever row a generic
+    # Completed filter happens to put first -- see
+    # _ensure_completed_report() docstring for why (one of the large
+    # multi-day automated reports has been observed to land on 'failed').
+    TC10_REPORT_NAME = "Automated Report - 1 Day"
+    TC10_REPORT_DAYS = 1
+
     def test_tc10_download_initiates(self, download_center_page):
         ensure_on_dc_page(download_center_page)
-        download_center_page.open_filter_panel()
-        download_center_page.page.wait_for_timeout(300)
-        download_center_page.set_filter_status(RcsDownloadCenterPage.STATUS_COMPLETED)
-        download_center_page.page.wait_for_timeout(1500)
-        if download_center_page.get_row_count() == 0:
-            pytest.skip("No completed reports available to test download")
+
+        row_idx = _ensure_completed_report(
+            download_center_page, self.TC10_REPORT_NAME, self.TC10_REPORT_DAYS
+        )
+        if row_idx is None:
+            pytest.skip(
+                f"'{self.TC10_REPORT_NAME}' never reached 'completed' status "
+                "within the wait budget -- cannot test download without a "
+                "completed report"
+            )
 
         download_center_page.clear_download_dir()
 
-        # download_report() waits directly on Playwright's own download
-        # event for this specific click (page.expect_download()) instead
-        # of clicking then separately polling/sleeping for a file to show
-        # up -- the same proven pattern already used by every Bulk
-        # Actions -> Export method in this codebase (RcsAgentPage.
-        # export_csv(), SmsCampaignReportPage.click_export_csv(), etc.).
-        result = download_center_page.download_report(row_idx=0, timeout_ms=60000)
+        # Diagnostic: what does the download control for this row actually
+        # resolve to? Captured BEFORE clicking, unconditionally, so it's
+        # available for the failure message no matter what happens next --
+        # same evidence-capture approach already applied to the SMS
+        # Download Center's equivalent TC_10 after a real run there showed
+        # a bare "download timed out" assertion wasn't enough to tell a
+        # locator miss apart from a genuinely slow export.
+        diag = download_center_page.diagnose_download_target(row_idx=row_idx)
+
+        seen_responses = []
+
+        def _on_response(resp):
+            try:
+                url = resp.url
+                if any(k in url.lower() for k in ("download", "export", "report")):
+                    seen_responses.append(f"{resp.status} {url}")
+            except Exception:
+                pass
+
+        download_center_page.page.on("response", _on_response)
+        try:
+            # download_report() waits directly on Playwright's own download
+            # event for this specific click (page.expect_download()) instead
+            # of clicking then separately polling/sleeping for a file to show
+            # up -- the same proven pattern already used by every Bulk
+            # Actions -> Export method in this codebase (RcsAgentPage.
+            # export_csv(), SmsCampaignReportPage.click_export_csv(), etc.).
+            result = download_center_page.download_report(row_idx=row_idx, timeout_ms=60000)
+        finally:
+            download_center_page.page.remove_listener("response", _on_response)
+
         assert result is not None, (
             "Download did not complete within 60 seconds after clicking "
-            "the Download icon on row 0. Possible causes: locator miss / "
-            "disabled control (see _action_btn_for_row()'s docstring: the "
-            "exact title attribute for this page's Download action is "
-            "unconfirmed), report not actually in a downloadable "
-            "'completed' state despite the Completed filter, or the "
-            "download did not fire a Playwright download event."
+            f"the Download icon on row {row_idx}.\n"
+            f"Download control resolved via: {diag['matched_by']}\n"
+            f"  tag={diag['tag']!r} href={diag['href']!r} title={diag['title']!r} "
+            f"aria-label={diag['aria_label']!r} text={diag['text']!r}\n"
+            "Network responses matching download/export/report seen during "
+            f"the click window: {seen_responses or '(none -- no matching request was ever sent)'}\n"
+            "Reading this: matched_by == None means no download control was "
+            "found at all for this row -- a locator problem. An empty "
+            "response list means the click never fired a request -- also a "
+            "locator/click problem. A response listed with a 2xx status "
+            "means the export genuinely never finished (or never raised a "
+            "Playwright download event) within 60s -- a timing/environment "
+            "issue, not a locator issue."
         )
         downloaded = result["file_path"]
         print(f"[TC_10] Download completed in {result['elapsed_s']:.2f}s, {result['file_size']} bytes")
@@ -678,20 +768,43 @@ class TestTC13CancelDelete:
 
     def test_tc13_cancel_delete(self, download_center_page, disposable_report):
         ensure_on_dc_page(download_center_page)
-        download_center_page.search(disposable_report)
-        download_center_page.page.wait_for_timeout(1500)
-        before_count = download_center_page.get_row_count()
-        if before_count == 0:
+
+        # Wait for the disposable report to actually reach 'completed'
+        # rather than just checking it's visible -- a real run showed
+        # deleting row 0 right after creation failing with "no delete
+        # control was found at all for this row" (diagnose_delete_target
+        # confirmed matched_by=None): the Delete action apparently isn't
+        # rendered while a report is still pending/processing. Reusing
+        # _ensure_completed_report() (already proven for TC_10) makes
+        # this wait for the same terminal state before deleting.
+        row_idx = _ensure_completed_report(download_center_page, disposable_report, days=7)
+        if row_idx is None:
             reset_filters(download_center_page)
             pytest.skip(
-                f"'{disposable_report}' not visible yet -- report creation may "
-                f"still be queued"
+                f"'{disposable_report}' never reached 'completed' status -- "
+                "cannot test delete without a completed, deletable report"
             )
+        before_count = download_center_page.get_row_count()
 
-        download_center_page.click_delete_icon(row_idx=0)
+        diag = download_center_page.diagnose_delete_target(row_idx=row_idx)
+        download_center_page.click_delete_icon(row_idx=row_idx)
         download_center_page.page.wait_for_timeout(800)
+        click_debug = getattr(download_center_page, "last_click_delete_debug", {})
         assert download_center_page.is_delete_modal_visible(), (
-            "Delete confirmation did not appear"
+            "Delete confirmation did not appear\n"
+            f"Delete control resolved via: {diag['matched_by']}\n"
+            f"  tag={diag['tag']!r} title={diag['title']!r} "
+            f"aria-label={diag['aria_label']!r} text={diag['text']!r}\n"
+            f"click_delete_icon(): matched={click_debug.get('matched')} "
+            f"clicked={click_debug.get('clicked')}\n"
+            "Reading this: matched_by == None means no delete control was "
+            "found at all for this row -- a locator problem. clicked == "
+            "False means a real element was found but the click itself "
+            "raised -- also a locator/visibility problem. clicked == True "
+            "with no modal means the click landed but opened neither a "
+            "native confirm() dialog nor SweetAlert2 -- the app may use a "
+            "third confirmation mechanism for this page that isn't handled "
+            "yet."
         )
         download_center_page.cancel_delete()
         download_center_page.page.wait_for_timeout(500)
@@ -723,20 +836,40 @@ class TestTC12ConfirmDelete:
 
     def test_tc12_confirm_delete(self, download_center_page, disposable_report):
         ensure_on_dc_page(download_center_page)
-        download_center_page.search(disposable_report)
-        download_center_page.page.wait_for_timeout(1500)
-        before_count = download_center_page.get_row_count()
-        if before_count == 0:
+
+        # Wait for the disposable report to actually reach 'completed'
+        # rather than just checking it's visible -- see TC_13's own
+        # comment for the real-run evidence (diagnose_delete_target
+        # confirmed matched_by=None: no Delete control renders while a
+        # report is still pending/processing).
+        row_idx = _ensure_completed_report(download_center_page, disposable_report, days=7)
+        if row_idx is None:
             reset_filters(download_center_page)
             pytest.skip(
-                f"'{disposable_report}' not found -- report creation may still "
-                f"be queued"
+                f"'{disposable_report}' never reached 'completed' status -- "
+                "cannot test delete without a completed, deletable report"
             )
+        before_count = download_center_page.get_row_count()
 
-        download_center_page.click_delete_icon(row_idx=0)
+        diag = download_center_page.diagnose_delete_target(row_idx=row_idx)
+        download_center_page.click_delete_icon(row_idx=row_idx)
         download_center_page.page.wait_for_timeout(800)
+        click_debug = getattr(download_center_page, "last_click_delete_debug", {})
         assert download_center_page.is_delete_modal_visible(), (
-            "Delete confirmation did not appear"
+            "Delete confirmation did not appear\n"
+            f"Delete control resolved via: {diag['matched_by']}\n"
+            f"  tag={diag['tag']!r} title={diag['title']!r} "
+            f"aria-label={diag['aria_label']!r} text={diag['text']!r}\n"
+            f"click_delete_icon(): matched={click_debug.get('matched')} "
+            f"clicked={click_debug.get('clicked')}\n"
+            "Reading this: matched_by == None means no delete control was "
+            "found at all for this row -- a locator problem. clicked == "
+            "False means a real element was found but the click itself "
+            "raised -- also a locator/visibility problem. clicked == True "
+            "with no modal means the click landed but opened neither a "
+            "native confirm() dialog nor SweetAlert2 -- the app may use a "
+            "third confirmation mechanism for this page that isn't handled "
+            "yet."
         )
         download_center_page.confirm_delete()
         # Poll instead of a single fixed wait -- proactively applying the
@@ -1011,18 +1144,11 @@ class TestTC20Report20Days:
             f"Expected at least 1 row for '{self.REPORT_NAME}', got 0"
         )
 
-    def test_tc20_report_status_not_failed(self, download_center_page):
-        ensure_on_dc_page(download_center_page)
-        download_center_page.search(self.REPORT_NAME)
-        download_center_page.page.wait_for_timeout(1500)
-        row_count = download_center_page.get_row_count()
-        if row_count == 0:
-            pytest.skip("Report row not visible yet")
-        status = download_center_page.get_row_status(0).lower()
-        reset_filters(download_center_page)
-        assert "failed" not in status, (
-            f"20-day report has status '{status}'; expected pending/processing/completed"
-        )
+    # test_tc20_report_status_not_failed was removed per explicit
+    # instruction -- a live pytest run showed the real "Automated Report
+    # - 20 Days" report genuinely landing in status 'failed' on this
+    # backend (not a test/locator bug), and the user asked for it to be
+    # dropped rather than the test being made to tolerate 'failed'.
 
 
 # ══════════════════════════════════════════════════════════════════════════════

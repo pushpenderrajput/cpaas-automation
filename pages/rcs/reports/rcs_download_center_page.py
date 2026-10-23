@@ -593,6 +593,43 @@ class RcsDownloadCenterPage(BasePage):
             pass
         return None
 
+    def diagnose_download_target(self, row_idx=0):
+        """Best-effort read of the download control's own attributes for
+        the given row, WITHOUT clicking it. Ported from the SMS Download
+        Center page's own diagnose_download_target() -- added because
+        download_report() below swallows every failure (locator miss,
+        disabled control, or a genuinely slow/never-firing download) into
+        a single `None`, so a bare "download timed out" assertion can't
+        tell those apart. This separates 'nothing real was ever clicked'
+        (locator problem) from 'the right element was clicked but no
+        download followed' (environment/timing problem) for the next
+        failure, same rationale as the SMS equivalent."""
+        info = {
+            "matched_by": None, "tag": None, "href": None,
+            "title": None, "aria_label": None, "class": None, "text": None,
+        }
+        btn = self._action_btn_for_row(row_idx, "download")
+        info["matched_by"] = "attribute-or-positional" if btn is not None else None
+        if btn is None:
+            try:
+                candidate = self.page.locator(self.ROW_DOWNLOAD_ICON).first
+                if candidate.count() > 0:
+                    btn = candidate
+                    info["matched_by"] = "global-fallback-locator"
+            except Exception:
+                pass
+        if btn is not None:
+            try:
+                info["tag"] = btn.evaluate("el => el.tagName")
+                info["href"] = btn.get_attribute("href")
+                info["title"] = btn.get_attribute("title")
+                info["aria_label"] = btn.get_attribute("aria-label")
+                info["class"] = btn.get_attribute("class")
+                info["text"] = (btn.inner_text() or "").strip()[:40]
+            except Exception:
+                pass
+        return info
+
     def click_view_icon(self, row_idx=0):
         btn = self._action_btn_for_row(row_idx, "view")
         if btn is not None:
@@ -717,6 +754,40 @@ class RcsDownloadCenterPage(BasePage):
             or href.strip() == "#"
         )
 
+    def diagnose_delete_target(self, row_idx=0):
+        """Best-effort read of the delete control's own attributes for
+        the given row, WITHOUT clicking it -- same rationale as
+        diagnose_download_target() above. Added because click_delete_icon()
+        silently discards whether it ever found/clicked a real element
+        when `btn` resolves to None or the click raises, so a bare
+        "Delete confirmation did not appear" assertion can't tell a
+        locator miss apart from a click that landed but opened neither a
+        native dialog nor SweetAlert2."""
+        info = {
+            "matched_by": None, "tag": None, "title": None,
+            "aria_label": None, "class": None, "text": None,
+        }
+        btn = self._action_btn_for_row(row_idx, "delete")
+        info["matched_by"] = "attribute-or-positional" if btn is not None else None
+        if btn is None:
+            try:
+                candidate = self.page.locator(self.ROW_DELETE_ICON).first
+                if candidate.count() > 0:
+                    btn = candidate
+                    info["matched_by"] = "global-fallback-locator"
+            except Exception:
+                pass
+        if btn is not None:
+            try:
+                info["tag"] = btn.evaluate("el => el.tagName")
+                info["title"] = btn.get_attribute("title")
+                info["aria_label"] = btn.get_attribute("aria-label")
+                info["class"] = btn.get_attribute("class")
+                info["text"] = (btn.inner_text() or "").strip()[:40]
+            except Exception:
+                pass
+        return info
+
     def click_delete_icon(self, row_idx=0):
         """
         Click the delete action for the given row.
@@ -766,6 +837,7 @@ class RcsDownloadCenterPage(BasePage):
                 except Exception:
                     pass
 
+        self.last_click_delete_debug = {"matched": btn is not None, "clicked": clicked}
         if clicked:
             self.page.wait_for_timeout(600)
         self.page.wait_for_timeout(500)
